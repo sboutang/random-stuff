@@ -24,11 +24,16 @@ def get_google_address(iatacode, lat, lon, tz, region, rawcountry):
     addr_pattern = '.*(\(\w{3}\)|Airport,).*' # match lines with IATA code in () or the word "Airport," seems the best google result
     country_pattern = '.+, (.+$)'
     just_addr_pattern = '^(.*?),\s*(.*)$' # split the description and address
+    iata_pattern = '^.*\(\w{3}\).*$'
     site = (lat, lon)
     reverse_geocode_result = gmaps.reverse_geocode(site)
     for line in reverse_geocode_result:
         match_addr = re.search(addr_pattern, line['formatted_address'])
-        if match_addr:
+        match_iata = re.search(iata_pattern, line['formatted_address'])
+        if match_addr and match_iata:
+            matched_address = match_addr.group(0)
+            break
+        elif match_addr and not match_iata:
             matched_address = match_addr.group(0)
 
     match_country = re.search(country_pattern, matched_address)
@@ -46,8 +51,8 @@ def print_data(iatacode, addr, tz, lat, lon, description, region, country, count
             "region": {
                 "name": region
             },
-            "physical_address": addr,
             "description": description,
+            "physical_address": addr,
             "country": country,
             "country_code": country_code.upper(),
             #"country_code2": rawcountry,
