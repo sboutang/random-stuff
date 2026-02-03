@@ -11,65 +11,86 @@ import re
 import argparse
 import ipaddress
 
-# Keep only characters that can appear in IP/CIDR/zone-id tokens.
-# (We deliberately allow % for IPv6 zone IDs like fe80::1%en0.)
-ALLOWED_CHARS_RE = re.compile(r"[^0-9A-Fa-f:.%/]+")
+# Allow zone-id characters so tokens like %en0 do not get truncated.
+ALLOWED_CHARS_RE = re.compile(r"[^0-9A-Fa-f:.%/_A-Za-z-]+")
 
-# Strip junk punctuation around tokens like "[2001:db8::1]:443" or "8.8.8.8,"
-STRIP_EDGES_RE = re.compile(r"^[^0-9A-Fa-f:.%/]+|[^0-9A-Fa-f:.%/]+$")
+# Strip junk punctuation around tokens like "[2001:db8::1%en0]:443" or "8.8.8.8,"
+STRIP_EDGES_RE = re.compile(r"^[^0-9A-Fa-f:.%/_A-Za-z-]+|[^0-9A-Fa-f:.%/_A-Za-z-]+$")
+
 
 def clean_token(tok: str) -> str:
-    # Strip surrounding punctuation repeatedly until stable
     prev = None
     while tok != prev:
         prev = tok
         tok = STRIP_EDGES_RE.sub("", tok)
     return tok
 
-def validate_ip_or_cidr(tok: str, keep_prefix: bool):
+
+def split_zone(ip: str):
+    # Returns (ip_without_zone, zone_or_empty)
+    if "%" in ip:
+        base, zone = ip.split("%", 1)
+        return base, zone
+    return ip, ""
+
+
+def validate_ip_or_cidr(tok: str, keep_prefix: bool, keep_zone: bool):
     """
     Returns string to output if valid, else None.
-    If keep_prefix is False, CIDR tokens output as just the IP portion.
-    If keep_prefix is True, CIDR tokens output as CIDR; plain IPs output as IP.
+    - keep_prefix: keep CIDR (/NN) when present
+    - keep_zone: keep IPv6 zone-id (%en0). Default is False (strip zone IDs).
     """
     tok = clean_token(tok)
     if not tok:
         return None
 
-    # Split possible CIDR
+    # CIDR case
     if "/" in tok:
         ip_part, prefix = tok.split("/", 1)
         if not prefix.isdigit():
             return None
 
-        # Handle zone id in validation (ipaddress doesn't accept %zone)
-        ip_base = ip_part.split("%", 1)[0]
-        candidate = f"{ip_base}/{prefix}"
+        ip_base, zone = split_zone(ip_part)
 
+        # Zone IDs are not valid in CIDR notation; validate without zone.
+        candidate = f"{ip_base}/{prefix}"
         try:
             ipaddress.ip_network(candidate, strict=False)
         except ValueError:
             return None
 
-        return tok if keep_prefix else ip_part
+        if keep_prefix:
+            # Output as CIDR, but never include zone in CIDR
+            return f"{ip_base}/{prefix}"
+        else:
+            # Output address only (optionally with zone)
+            return ip_part if (keep_zone and zone) else ip_base
 
     # Plain IP (maybe with zone)
-    ip_base = tok.split("%", 1)[0]
+    ip_base, zone = split_zone(tok)
     try:
         ipaddress.ip_address(ip_base)
     except ValueError:
         return None
-    return tok
+
+    return tok if (keep_zone and zone) else ip_base
+
 
 def main():
     ap = argparse.ArgumentParser(
-        prog="onlyip3",
-        description="Extract validated IPv4/IPv6 addresses from stdin; optionally keep CIDR prefixes.",
+        prog="onlyip",
+        description="Extract validated IPv4/IPv6 addresses from stdin; optional CIDR; clean IPv6 zone-id handling.",
     )
     ap.add_argument(
         "--prefix",
         action="store_true",
         help="Keep CIDR notation when present (e.g., 10.0.0.0/8, 2001:db8::/32).",
+    )
+    ap.add_argument(
+        "--keep-zone",
+        action="store_true",
+        # NOTE: escape % as %% for Python 3.14 argparse help formatting
+        help="Keep IPv6 zone IDs like fe80::1%%en0 (default strips zone IDs).",
     )
     ap.add_argument(
         "--unique",
@@ -80,13 +101,13 @@ def main():
 
     text = sys.stdin.read()
 
-    # Turn everything not IP-ish into spaces, then scan tokens
+    # Turn everything not token-ish into spaces, then scan tokens
     spaced = ALLOWED_CHARS_RE.sub(" ", text)
     tokens = spaced.split()
 
     seen = set()
     for tok in tokens:
-        out = validate_ip_or_cidr(tok, keep_prefix=args.prefix)
+        out = validate_ip_or_cidr(tok, keep_prefix=args.prefix, keep_zone=args.keep_zone)
         if out is None:
             continue
         if args.unique:
@@ -94,6 +115,7 @@ def main():
                 continue
             seen.add(out)
         print(out)
+
 
 if __name__ == "__main__":
     main()
