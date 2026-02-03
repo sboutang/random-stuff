@@ -1,0 +1,99 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#     "argparse",
+#     "ipaddress",
+# ]
+# ///
+import sys
+import re
+import argparse
+import ipaddress
+
+# Keep only characters that can appear in IP/CIDR/zone-id tokens.
+# (We deliberately allow % for IPv6 zone IDs like fe80::1%en0.)
+ALLOWED_CHARS_RE = re.compile(r"[^0-9A-Fa-f:.%/]+")
+
+# Strip junk punctuation around tokens like "[2001:db8::1]:443" or "8.8.8.8,"
+STRIP_EDGES_RE = re.compile(r"^[^0-9A-Fa-f:.%/]+|[^0-9A-Fa-f:.%/]+$")
+
+def clean_token(tok: str) -> str:
+    # Strip surrounding punctuation repeatedly until stable
+    prev = None
+    while tok != prev:
+        prev = tok
+        tok = STRIP_EDGES_RE.sub("", tok)
+    return tok
+
+def validate_ip_or_cidr(tok: str, keep_prefix: bool):
+    """
+    Returns string to output if valid, else None.
+    If keep_prefix is False, CIDR tokens output as just the IP portion.
+    If keep_prefix is True, CIDR tokens output as CIDR; plain IPs output as IP.
+    """
+    tok = clean_token(tok)
+    if not tok:
+        return None
+
+    # Split possible CIDR
+    if "/" in tok:
+        ip_part, prefix = tok.split("/", 1)
+        if not prefix.isdigit():
+            return None
+
+        # Handle zone id in validation (ipaddress doesn't accept %zone)
+        ip_base = ip_part.split("%", 1)[0]
+        candidate = f"{ip_base}/{prefix}"
+
+        try:
+            ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            return None
+
+        return tok if keep_prefix else ip_part
+
+    # Plain IP (maybe with zone)
+    ip_base = tok.split("%", 1)[0]
+    try:
+        ipaddress.ip_address(ip_base)
+    except ValueError:
+        return None
+    return tok
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="onlyip3",
+        description="Extract validated IPv4/IPv6 addresses from stdin; optionally keep CIDR prefixes.",
+    )
+    ap.add_argument(
+        "--prefix",
+        action="store_true",
+        help="Keep CIDR notation when present (e.g., 10.0.0.0/8, 2001:db8::/32).",
+    )
+    ap.add_argument(
+        "--unique",
+        action="store_true",
+        help="De-duplicate output (preserves first-seen order).",
+    )
+    args = ap.parse_args()
+
+    text = sys.stdin.read()
+
+    # Turn everything not IP-ish into spaces, then scan tokens
+    spaced = ALLOWED_CHARS_RE.sub(" ", text)
+    tokens = spaced.split()
+
+    seen = set()
+    for tok in tokens:
+        out = validate_ip_or_cidr(tok, keep_prefix=args.prefix)
+        if out is None:
+            continue
+        if args.unique:
+            if out in seen:
+                continue
+            seen.add(out)
+        print(out)
+
+if __name__ == "__main__":
+    main()
